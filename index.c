@@ -1,254 +1,180 @@
-// index.c — Staging area implementation
+// object.c — Content-addressable object store
 //
-// Text format of .pes/index (one entry per line, sorted by path):
-//
-// <mode> <64-char-hex-hash> <mtime> <size> <path>
-//
-// Example:
-// 100644 a1b2c3d4e5f6... 1699900000 42 README.md
-// 100644 f7e8d9c0b1a2... 1699900100 128 src/main.c
-//
-// This is intentionally a simple text format. No magic numbers, no
-// binary parsing. The focus is on the staging area CONCEPT (tracking
-// what will go into the next commit) and ATOMIC WRITES (temp+rename).
+// Every piece of data (file contents, directory listings, commits) is stored
+// as an "object" named by its SHA-256 hash. Objects are stored under
+// .pes/objects/XX/YYYYYY... where XX is the first two hex characters of the
+// hash (directory sharding).
 
-#include "index.h"
-#include "tree.h"
+#include "pes.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
-#include <dirent.h>
-#include <sys/stat.h>
+#include <openssl/evp.h>
 #include <unistd.h>
-#include <inttypes.h>
-#include "tree.h"
-
-uint32_t get_file_mode(const char *path);
-
-// Forward declaration from object.c
-int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out);
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <fcntl.h>
+#include <errno.h>
 
 // ─── PROVIDED ────────────────────────────────────────────────────────────────
 
-// Find an index entry by path (linear scan).
-IndexEntry* index_find(Index *index, const char *path) {
-    for (int i = 0; i < index->count; i++) {
-        if (strcmp(index->entries[i].path, path) == 0)
-            return &index->entries[i];
+void hash_to_hex(const ObjectID *id, char *hex_out) {
+    for (int i = 0; i < HASH_SIZE; i++) {
+        sprintf(hex_out + i * 2, "%02x", id->hash[i]);
     }
-    return NULL;
+    hex_out[HASH_HEX_SIZE] = '\0';
 }
 
-// Remove a file from the index.
-// Returns 0 on success, -1 if path not in index.
-int index_remove(Index *index, const char *path) {
-    for (int i = 0; i < index->count; i++) {
-        if (strcmp(index->entries[i].path, path) == 0) {
-            int remaining = index->count - i - 1;
-            if (remaining > 0) {
-                memmove(&index->entries[i], &index->entries[i + 1],
-                        (size_t)remaining * sizeof(IndexEntry));
-            }
-            index->count--;
-            return index_save(index);
-        }
+int hex_to_hash(const char *hex, ObjectID *id_out) {
+    if (strlen(hex) < HASH_HEX_SIZE) return -1;
+    for (int i = 0; i < HASH_SIZE; i++) {
+        unsigned int byte;
+        if (sscanf(hex + i * 2, "%2x", &byte) != 1) return -1;
+        id_out->hash[i] = (uint8_t)byte;
     }
-    fprintf(stderr, "error: '%s' is not in the index\n", path);
-    return -1;
-}
-
-// Print the status of the working directory.
-//
-// Identifies files that are staged, unstaged (modified/deleted in working dir),
-// and untracked (present in working dir but not in index).
-// Returns 0.
-int index_status(const Index *index) {
-    printf("Staged changes:\n");
-    int staged_count = 0;
-
-    for (int i = 0; i < index->count; i++) {
-        printf(" staged: %s\n", index->entries[i].path);
-        staged_count++;
-    }
-    if (staged_count == 0) printf(" (nothing to show)\n");
-    printf("\n");
-
-    printf("Unstaged changes:\n");
-    int unstaged_count = 0;
-    for (int i = 0; i < index->count; i++) {
-        struct stat st;
-        if (stat(index->entries[i].path, &st) != 0) {
-            printf(" deleted: %s\n", index->entries[i].path);
-            unstaged_count++;
-        } else {
-            if ((uint64_t)st.st_mtime != index->entries[i].mtime_sec ||
-                (uint32_t)st.st_size != index->entries[i].size) {
-                printf(" modified: %s\n", index->entries[i].path);
-                unstaged_count++;
-            }
-        }
-    }
-    if (unstaged_count == 0) printf(" (nothing to show)\n");
-    printf("\n");
-
-    printf("Untracked files:\n");
-    int untracked_count = 0;
-    DIR *dir = opendir(".");
-    if (dir) {
-        struct dirent *ent;
-        while ((ent = readdir(dir)) != NULL) {
-            if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
-                continue;
-            if (strcmp(ent->d_name, ".pes") == 0)
-                continue;
-            if (strcmp(ent->d_name, "pes") == 0)
-                continue;
-            if (strstr(ent->d_name, ".o") != NULL)
-                continue;
-
-            int is_tracked = 0;
-            for (int i = 0; i < index->count; i++) {
-                if (strcmp(index->entries[i].path, ent->d_name) == 0) {
-                    is_tracked = 1;
-                    break;
-                }
-            }
-
-            if (!is_tracked) {
-                struct stat st;
-                if (stat(ent->d_name, &st) == 0 && S_ISREG(st.st_mode)) {
-                    printf(" untracked: %s\n", ent->d_name);
-                    untracked_count++;
-                }
-            }
-        }
-        closedir(dir);
-    }
-    if (untracked_count == 0) printf(" (nothing to show)\n");
-    printf("\n");
     return 0;
 }
 
-// ─── TODO: Implement these ───────────────────────────────────────────────────
-
-static int compare_index_entries(const void *a, const void *b) {
-    const IndexEntry *ea = (const IndexEntry *)a;
-    const IndexEntry *eb = (const IndexEntry *)b;
-    return strcmp(ea->path, eb->path);
+void compute_hash(const void *data, size_t len, ObjectID *id_out) {
+    unsigned int hash_len;
+    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+    EVP_DigestInit_ex(ctx, EVP_sha256(), NULL);
+    EVP_DigestUpdate(ctx, data, len);
+    EVP_DigestFinal_ex(ctx, id_out->hash, &hash_len);
+    EVP_MD_CTX_free(ctx);
 }
 
-// Load the index from .pes/index.
-// Returns 0 on success, -1 on error.
-int index_load(Index *index) {
-    if (!index) return -1;
+// Get the filesystem path where an object should be stored.
+// Format: .pes/objects/XX/YYYYYYYY...
+// The first 2 hex chars form the shard directory; the rest is the filename.
+void object_path(const ObjectID *id, char *path_out, size_t path_size) {
+    char hex[HASH_HEX_SIZE + 1];
+    hash_to_hex(id, hex);
+    snprintf(path_out, path_size, "%s/%.2s/%s", OBJECTS_DIR, hex, hex + 2);
+}
 
-    index->count = 0;
+int object_exists(const ObjectID *id) {
+    char path[512];
+    object_path(id, path, sizeof(path));
+    return access(path, F_OK) == 0;
+}
 
-    FILE *f = fopen(INDEX_FILE, "r");
-    if (!f) {
-        return 0;  // no index yet is not an error
+// ─── TODO: Implement these ──────────────────────────────────────────────────
+
+static const char *object_type_name(ObjectType type) {
+    switch (type) {
+        case OBJ_BLOB:   return "blob";
+        case OBJ_TREE:   return "tree";
+        case OBJ_COMMIT: return "commit";
+        default:         return NULL;
+    }
+}
+
+int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out) {
+    const char *type_str = object_type_name(type);
+    if (!type_str || !data || !id_out) return -1;
+
+    char header[64];
+    int header_len = snprintf(header, sizeof(header), "%s %zu", type_str, len);
+    if (header_len < 0 || (size_t)header_len >= sizeof(header)) return -1;
+
+    size_t full_len = (size_t)header_len + 1 + len;
+    unsigned char *full = malloc(full_len);
+    if (!full) return -1;
+
+    memcpy(full, header, (size_t)header_len);
+    full[header_len] = '\0';
+    memcpy(full + header_len + 1, data, len);
+
+    ObjectID id;
+    compute_hash(full, full_len, &id);
+    *id_out = id;
+
+    if (object_exists(&id)) {
+        free(full);
+        return 0;
     }
 
-    char line[2048];
-
-    while (fgets(line, sizeof(line), f)) {
-        if (index->count >= MAX_INDEX_ENTRIES) {
-            fclose(f);
-            return -1;
-        }
-
-        IndexEntry entry;
-        char hash_hex[HASH_HEX_SIZE + 1];
-
-        int rc = sscanf(line, "%o %64s %" SCNu64 " %u %[^\n]",
-                        &entry.mode,
-                        hash_hex,
-                        &entry.mtime_sec,
-                        &entry.size,
-                        entry.path);
-        if (rc != 5) {
-            fclose(f);
-            return -1;
-        }
-
-        if (hex_to_hash(hash_hex, &entry.hash) != 0) {
-            fclose(f);
-            return -1;
-        }
-
-        index->entries[index->count++] = entry;
+    if (mkdir(PES_DIR, 0755) == -1 && errno != EEXIST) {
+        free(full);
+        return -1;
+    }
+    if (mkdir(OBJECTS_DIR, 0755) == -1 && errno != EEXIST) {
+        free(full);
+        return -1;
     }
 
-    fclose(f);
+    char hex[HASH_HEX_SIZE + 1];
+    hash_to_hex(&id, hex);
+
+    char shard_dir[512];
+    snprintf(shard_dir, sizeof(shard_dir), "%s/%.2s", OBJECTS_DIR, hex);
+
+    if (mkdir(shard_dir, 0755) == -1 && errno != EEXIST) {
+        free(full);
+        return -1;
+    }
+
+    char final_path[512];
+    object_path(&id, final_path, sizeof(final_path));
+
+    char temp_path[512];
+    snprintf(temp_path, sizeof(temp_path), "%s/.tmp-%ld-%d",
+             shard_dir, (long)getpid(), rand());
+
+    int fd = open(temp_path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (fd < 0) {
+        free(full);
+        return -1;
+    }
+
+    size_t written = 0;
+    while (written < full_len) {
+        ssize_t n = write(fd, full + written, full_len - written);
+        if (n < 0) {
+            close(fd);
+            unlink(temp_path);
+            free(full);
+            return -1;
+        }
+        written += (size_t)n;
+    }
+
+    if (fsync(fd) == -1) {
+        close(fd);
+        unlink(temp_path);
+        free(full);
+        return -1;
+    }
+
+    if (close(fd) == -1) {
+        unlink(temp_path);
+        free(full);
+        return -1;
+    }
+
+    if (rename(temp_path, final_path) == -1) {
+        unlink(temp_path);
+        free(full);
+        return -1;
+    }
+
+    int dfd = open(shard_dir, O_RDONLY | O_DIRECTORY);
+    if (dfd >= 0) {
+        fsync(dfd);
+        close(dfd);
+    }
+
+    free(full);
     return 0;
 }
 
-// Save the index to .pes/index atomically.
-// Returns 0 on success, -1 on error.
+int object_read(const ObjectID *id, ObjectType *type_out, void **data_out, size_t *len_out) {
+    if (!id || !type_out || !data_out || !len_out) return -1;
 
-int index_save(const Index *index) {
-    if (!index) return -1;
-
-    Index *sorted = malloc(sizeof(Index));
-    if (!sorted) return -1;
-    *sorted = *index;
-
-    qsort(sorted->entries, (size_t)sorted->count, sizeof(IndexEntry), compare_index_entries);
-
-    char tmp_path[600];
-    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", INDEX_FILE);
-
-    FILE *f = fopen(tmp_path, "w");
-    if (!f) {
-        free(sorted);
-        return -1;
-    }
-
-    for (int i = 0; i < sorted->count; i++) {
-        char hash_hex[HASH_HEX_SIZE + 1];
-        hash_to_hex(&sorted->entries[i].hash, hash_hex);
-
-        if (fprintf(f, "%o %s %" PRIu64 " %u %s\n",
-                    sorted->entries[i].mode,
-                    hash_hex,
-                    sorted->entries[i].mtime_sec,
-                    sorted->entries[i].size,
-                    sorted->entries[i].path) < 0) {
-            fclose(f);
-            unlink(tmp_path);
-            free(sorted);
-            return -1;
-        }
-    }
-
-    fflush(f);
-    if (fsync(fileno(f)) != 0) {
-        fclose(f);
-        unlink(tmp_path);
-        free(sorted);
-        return -1;
-    }
-
-    if (fclose(f) != 0) {
-        unlink(tmp_path);
-        free(sorted);
-        return -1;
-    }
-
-    if (rename(tmp_path, INDEX_FILE) != 0) {
-        unlink(tmp_path);
-        free(sorted);
-        return -1;
-    }
-
-    free(sorted);
-    return 0;
-}
-// Stage a file for the next commit.
-// Returns 0 on success, -1 on error.
-int index_add(Index *index, const char *path) {
-    if (!index || !path) return -1;
+    char path[512];
+    object_path(id, path, sizeof(path));
 
     FILE *f = fopen(path, "rb");
     if (!f) return -1;
@@ -258,62 +184,85 @@ int index_add(Index *index, const char *path) {
         return -1;
     }
 
-    long sz = ftell(f);
-    if (sz < 0) {
+    long file_size_long = ftell(f);
+    if (file_size_long < 0) {
         fclose(f);
         return -1;
     }
 
-    if (fseek(f, 0, SEEK_SET) != 0) {
+    size_t file_size = (size_t)file_size_long;
+    rewind(f);
+
+    unsigned char *buf = malloc(file_size);
+    if (!buf) {
         fclose(f);
         return -1;
     }
 
-    size_t len = (size_t)sz;
-    void *data = malloc(len > 0 ? len : 1);
-    if (!data) {
-        fclose(f);
-        return -1;
-    }
-
-    if (len > 0 && fread(data, 1, len, f) != len) {
-        free(data);
+    if (fread(buf, 1, file_size, f) != file_size) {
+        free(buf);
         fclose(f);
         return -1;
     }
     fclose(f);
 
-    ObjectID blob_id;
-    if (object_write(OBJ_BLOB, data, len, &blob_id) != 0) {
-        free(data);
-        return -1;
-    }
-    free(data);
-
-    struct stat st;
-    if (stat(path, &st) != 0) {
+    ObjectID computed;
+    compute_hash(buf, file_size, &computed);
+    if (memcmp(computed.hash, id->hash, HASH_SIZE) != 0) {
+        free(buf);
         return -1;
     }
 
-    IndexEntry *existing = index_find(index, path);
-    if (existing) {
-        existing->mode = get_file_mode(path);
-        existing->hash = blob_id;
-        existing->mtime_sec = (uint64_t)st.st_mtime;
-        existing->size = (uint32_t)st.st_size;
-        return index_save(index);
-    }
-
-    if (index->count >= MAX_INDEX_ENTRIES) {
+    unsigned char *nul = memchr(buf, '\0', file_size);
+    if (!nul) {
+        free(buf);
         return -1;
     }
 
-    IndexEntry *e = &index->entries[index->count++];
-    e->mode = get_file_mode(path);
-    e->hash = blob_id;
-    e->mtime_sec = (uint64_t)st.st_mtime;
-    e->size = (uint32_t)st.st_size;
-    snprintf(e->path, sizeof(e->path), "%s", path);
+    size_t header_len = (size_t)(nul - buf);
+    char header[64];
+    if (header_len >= sizeof(header)) {
+        free(buf);
+        return -1;
+    }
 
-    return index_save(index);
+    memcpy(header, buf, header_len);
+    header[header_len] = '\0';
+
+    char type_str[16];
+    size_t data_len = 0;
+    if (sscanf(header, "%15s %zu", type_str, &data_len) != 2) {
+        free(buf);
+        return -1;
+    }
+
+    if (strcmp(type_str, "blob") == 0) {
+        *type_out = OBJ_BLOB;
+    } else if (strcmp(type_str, "tree") == 0) {
+        *type_out = OBJ_TREE;
+    } else if (strcmp(type_str, "commit") == 0) {
+        *type_out = OBJ_COMMIT;
+    } else {
+        free(buf);
+        return -1;
+    }
+
+    size_t actual_data_len = file_size - header_len - 1;
+    if (actual_data_len != data_len) {
+        free(buf);
+        return -1;
+    }
+
+    void *out = malloc(data_len ? data_len : 1);
+    if (!out) {
+        free(buf);
+        return -1;
+    }
+
+    memcpy(out, nul + 1, data_len);
+    *data_out = out;
+    *len_out = data_len;
+
+    free(buf);
+    return 0;
 }
