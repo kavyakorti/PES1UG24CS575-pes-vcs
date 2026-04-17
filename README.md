@@ -57,6 +57,9 @@ What Was Implemented
 `index_add` reads the target file, writes its contents as a blob object via `object_write`, and updates (or inserts) the index entry using the blob's hash and the file's current metadata.
 Screenshot 3A — init → add → status
 <img width="755" height="183" alt="image" src="https://github.com/user-attachments/assets/ceba1735-19f7-446d-a4cc-a708b42ea5bf" />
+<img width="756" height="520" alt="image" src="https://github.com/user-attachments/assets/722467de-782b-4276-a970-5554089940cb" />
+<img width="755" height="76" alt="image" src="https://github.com/user-attachments/assets/032b6a2a-eb81-4374-826a-7d53f25f27f7" />
+
 
 Screenshot 3B — Index File Contents
 <img width="765" height="149" alt="image" src="https://github.com/user-attachments/assets/d832c6e9-b9af-4e7d-978d-ec73ad6f6a98" />
