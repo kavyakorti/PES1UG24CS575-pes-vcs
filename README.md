@@ -22,8 +22,8 @@ Screenshot 1A — Phase 1 Tests Passing
 > <img width="763" height="219" alt="image" src="https://github.com/user-attachments/assets/a364ec17-3b52-4fc9-8fb8-a8174ba079c1" />
 
 Screenshot 1B — Sharded Object Directory
-> **Place screenshot here:** `find .pes/objects -type f` showing objects stored under two-character subdirectories like `.pes/objects/d5/8213f5...`
-![Sharded Directory](screenshots/1B_find_objects.png)
+<img width="762" height="470" alt="image" src="https://github.com/user-attachments/assets/1478776c-522a-4c83-b36c-4893d5cb8e40" />
+
 ---
 Phase 2 — Tree Objects
 Concepts: Directory representation, recursive structures, file modes and permissions  
@@ -31,10 +31,11 @@ Files implemented: `tree.c` — `tree_from_index`
 What Was Implemented
 `tree_from_index` builds a tree hierarchy from the staged index. It handles nested paths (e.g., `src/main.c` creates a `src` subtree), recursively writes all tree objects to the object store using `object_write`, and returns the root tree hash. Entries are sorted deterministically to ensure the same content always produces the same hash.
 Screenshot 2A — Phase 2 Tests Passing
-> **Place screenshot here:** `./test_tree` output showing PASS for tree serialize/parse roundtrip and tree deterministic serialization, and "All Phase 2 tests passed."
-![Phase 2 Tests](screenshots/2A_test_tree.png)
+<img width="765" height="158" alt="image" src="https://github.com/user-attachments/assets/fa2047f5-1116-458a-91c3-a3da9d074a88" />
+
 Screenshot 2B — Raw Tree Object (xxd)
-> **Place screenshot here:** Run the commands below to find a tree object and display its raw binary format.
+<img width="754" height="424" alt="image" src="https://github.com/user-attachments/assets/cee4873a-c5b0-4a70-8494-72ec38bfb095" />
+
 Commands to generate this screenshot:
 ```bash
 # Find which objects are trees
@@ -46,7 +47,6 @@ done
 # Once you find one starting with "tree", run:
 xxd .pes/objects/XX/YYYY... | head -20
 ```
-![Raw Tree Object](screenshots/2B_xxd_tree.png)
 ---
 Phase 3 — The Index (Staging Area)
 Concepts: File format design, atomic writes, change detection using metadata  
@@ -56,11 +56,11 @@ What Was Implemented
 `index_save` sorts entries by path, writes them to a temp file, calls `fsync()`, then atomically renames the temp file to `.pes/index`.
 `index_add` reads the target file, writes its contents as a blob object via `object_write`, and updates (or inserts) the index entry using the blob's hash and the file's current metadata.
 Screenshot 3A — init → add → status
-> **Place screenshot here:** Sequence of `./pes init`, `./pes add file1.txt file2.txt`, `./pes status` showing staged files.
-![Status Output](screenshots/3A_pes_status.png)
+<img width="755" height="183" alt="image" src="https://github.com/user-attachments/assets/ceba1735-19f7-446d-a4cc-a708b42ea5bf" />
+
 Screenshot 3B — Index File Contents
-> **Place screenshot here:** `cat .pes/index` showing two entries with mode, hash, mtime, size, and filename.
-![Index Contents](screenshots/3B_cat_index.png)
+<img width="765" height="149" alt="image" src="https://github.com/user-attachments/assets/d832c6e9-b9af-4e7d-978d-ec73ad6f6a98" />
+
 ---
 Phase 4 — Commits and History
 Concepts: Linked structures on disk, reference files, atomic pointer updates  
@@ -68,17 +68,21 @@ Files implemented: `commit.c` — `commit_create`
 What Was Implemented
 `commit_create` builds a tree from the current index via `tree_from_index()`, reads the current HEAD to obtain the parent commit hash (absent for the first commit), retrieves the author string from `pes_author()`, serialises the commit object, writes it to the object store, and atomically updates the branch ref pointed to by HEAD.
 Screenshot 4A — pes log (Three Commits)
-> **Place screenshot here:** `./pes log` output showing three commits with full hashes, Author, Date, and messages.
-![Log Output](screenshots/4A_pes_log.png)
+
+
 Screenshot 4B — Object Store Growth
-> **Place screenshot here:** `find .pes -type f | sort` after three commits, showing blobs, trees, commits, HEAD, index, and refs.
-![Object Store](screenshots/4B_find_pes.png)
+<img width="761" height="419" alt="image" src="https://github.com/user-attachments/assets/effda357-9461-4719-abaa-024b754d0ac5" />
+<img width="757" height="43" alt="image" src="https://github.com/user-attachments/assets/03162b56-f27c-4cdb-8ce9-5f5e8f7a79a1" />
+
 Screenshot 4C — Reference Chain
-> **Place screenshot here:** `cat .pes/refs/heads/main` (commit hash) and `cat .pes/HEAD` (`ref: refs/heads/main`).
-![Reference Chain](screenshots/4C_refs.png)
+<img width="756" height="117" alt="image" src="https://github.com/user-attachments/assets/9b7e27fd-05f6-47a8-9223-b4d21055396b" />
+
 Screenshot — Full Integration Test
-> **Place screenshot here:** `make test-integration` output showing all integration test sections passing and "All integration tests completed."
-![Integration Test](screenshots/integration_test.png)
+<img width="759" height="585" alt="image" src="https://github.com/user-attachments/assets/1a42fd66-59c7-4222-9c1a-3a1e98b7d411" />
+<img width="766" height="554" alt="image" src="https://github.com/user-attachments/assets/002babe0-55f3-46e6-8c8b-befe6535d662" />
+<img width="765" height="615" alt="image" src="https://github.com/user-attachments/assets/74f19dd2-9e7b-473f-9aa9-3d2ccd28e1e1" />
+<img width="762" height="146" alt="image" src="https://github.com/user-attachments/assets/3acf4899-b06e-4952-8ac4-d9174417d443" />
+
 ---
 Phase 5 — Branching and Checkout (Analysis)
 Q5.1 — Implementing `pes checkout <branch>`
@@ -162,5 +166,5 @@ Phase	ID	Screenshot	Status
 4	4A	`pes log` with three commits	✅
 4	4B	`find .pes -type f | sort` object growth	✅
 4	4C	`cat .pes/refs/heads/main` + `cat .pes/HEAD`	✅
-Final	—	`make test-integration` all passed	✅
+Final	—	`make test-integration` all passed	
 ---
