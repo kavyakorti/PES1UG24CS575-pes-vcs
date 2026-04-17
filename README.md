@@ -68,7 +68,7 @@ Files implemented: `commit.c` — `commit_create`
 What Was Implemented
 `commit_create` builds a tree from the current index via `tree_from_index()`, reads the current HEAD to obtain the parent commit hash (absent for the first commit), retrieves the author string from `pes_author()`, serialises the commit object, writes it to the object store, and atomically updates the branch ref pointed to by HEAD.
 Screenshot 4A — pes log (Three Commits)
-
+<img width="760" height="137" alt="image" src="https://github.com/user-attachments/assets/84166089-84db-4c06-a5f6-9eb25c069063" />
 
 Screenshot 4B — Object Store Growth
 <img width="761" height="419" alt="image" src="https://github.com/user-attachments/assets/effda357-9461-4719-abaa-024b754d0ac5" />
